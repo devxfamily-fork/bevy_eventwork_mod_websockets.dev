@@ -47,6 +47,7 @@ fn main() {
     app.insert_resource(NetworkSettings::default());
 
     app.init_resource::<GlobalChatSettings>();
+    app.init_resource::<ActiveConnection>();
 
     app.add_systems(PostUpdate, handle_chat_area);
 
@@ -81,15 +82,18 @@ fn handle_network_events(
     for event in new_network_events.read() {
         info!("Received event");
         match event {
-            NetworkEvent::Connected(_) => {
-                messages.add(SystemMessage::new(
-                    "Succesfully connected to server!".to_string(),
-                ));
+            NetworkEvent::Connected(id) => {
+                messages.add(SystemMessage::new(format!(
+                    "{} succesfully connected to server!",
+                    id
+                )));
                 text.0 = String::from("Disconnect");
             }
-
-            NetworkEvent::Disconnected(_) => {
-                messages.add(SystemMessage::new("Disconnected from server!".to_string()));
+            NetworkEvent::Disconnected(id) => {
+                messages.add(SystemMessage::new(format!(
+                    "{} disconnected from server!",
+                    id
+                )));
                 text.0 = String::from("Connect to server");
             }
             NetworkEvent::Error(err) => {
@@ -102,6 +106,11 @@ fn handle_network_events(
 ///////////////////////////////////////////////////////////////
 ////////////// Data Definitions ///////////////////////////////
 ///////////////////////////////////////////////////////////////
+
+#[derive(Resource, Default)]
+struct ActiveConnection {
+    pub cid: Option<ConnectionId>,
+}
 
 #[derive(Resource)]
 struct GlobalChatSettings {
@@ -206,7 +215,8 @@ type GameChatMessages = ChatMessages<ChatMessage>;
 struct ConnectButton;
 
 fn handle_connect_button(
-    net: ResMut<Network<WebSocketProvider>>,
+    mut active_conn: ResMut<ActiveConnection>,
+    mut net: ResMut<Network<WebSocketProvider>>,
     settings: Res<NetworkSettings>,
     interaction_query: Query<
         (&Interaction, &Children),
@@ -225,18 +235,35 @@ fn handle_connect_button(
     for (interaction, children) in interaction_query.iter() {
         let mut text = text_query.get_mut(children[0]).unwrap();
         if let Interaction::Pressed = interaction {
-            if net.has_connections() {
-                net.disconnect(ConnectionId { id: 0 })
-                    .expect("Couldn't disconnect from server!");
+            debug!("Pressed");
+            if let Some(cid) = active_conn.cid {
+                match net.disconnect(cid) {
+                    Ok(_) => {
+                        messages.add(SystemMessage::new(format!(
+                            "{} disconnect from server!",
+                            cid
+                        )));
+                    }
+                    Err(e) => {
+                        messages.add(SystemMessage::new(format!(
+                            "{} couldn't disconnect from server! err={:?}",
+                            cid, e
+                        )));
+                    }
+                }
+                active_conn.cid = None;
             } else {
                 text.0 = String::from("Connecting...");
-                messages.add(SystemMessage::new("Connecting to server..."));
-
-                net.connect(
+                let cid = net.connect(
                     url::Url::parse("ws://127.0.0.1:8081").unwrap(),
                     &task_pool.0,
                     &settings,
                 );
+                active_conn.cid = Some(cid);
+                messages.add(SystemMessage::new(format!(
+                    "{} connecting to server...",
+                    cid
+                )));
             }
         }
     }
@@ -246,6 +273,7 @@ fn handle_connect_button(
 struct MessageButton;
 
 fn handle_message_button(
+    active_conn: Res<ActiveConnection>,
     net: Res<Network<WebSocketProvider>>,
     interaction_query: Query<&Interaction, (Changed<Interaction>, With<MessageButton>)>,
     mut messages: Query<&mut GameChatMessages>,
@@ -258,17 +286,21 @@ fn handle_message_button(
 
     for interaction in interaction_query.iter() {
         if let Interaction::Pressed = interaction {
-            match net.send_message(
-                ConnectionId { id: 0 },
-                shared::UserChatMessage {
-                    message: String::from("Hello there!"),
-                },
-            ) {
-                Ok(()) => (),
-                Err(err) => messages.add(SystemMessage::new(format!(
-                    "Could not send message: {}",
-                    err
-                ))),
+            if let Some(cid) = active_conn.cid {
+                match net.send_message(
+                    cid,
+                    shared::UserChatMessage {
+                        message: String::from("Hello there!"),
+                    },
+                ) {
+                    Ok(()) => (),
+                    Err(err) => messages.add(SystemMessage::new(format!(
+                        "Could not send message: {}",
+                        err
+                    ))),
+                }
+            } else {
+                messages.add(SystemMessage::new("No connection to send message"));
             }
         }
     }
